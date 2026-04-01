@@ -5,17 +5,28 @@ The script knows where INAV stores its persistent configuration for a subset of
 STM32 targets (via linker scripts such as ``stm32_flash_f722xe.ld``).  Provide a
 ROM dump and the hardware identifier, and it will copy the FLASH_CONFIG window
 into a separate file for further analysis.
+
+author = "CIRCL https://www.circl.lu/"
+license = "GNU Affero General Public Licence https://www.gnu.org/licenses/agpl-3.0.en.html"
 """
+# pylint: disable=duplicate-code
 
 import argparse
-import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Dict, Tuple
+
+from lib.flash_extract_common import (
+    build_extract_parser,
+    copy_region,
+    resolve_dump_path,
+    resolve_output_path,
+)
 
 
 @dataclass(frozen=True)
 class FlashRegion:
+    """Describe one INAV FLASH_CONFIG window."""
+
     origin: int
     length: int
     note: str
@@ -72,74 +83,50 @@ HARDWARE_ALIASES: Dict[str, str] = {
 
 
 def normalize_hw_name(raw: str) -> str:
+    """Normalize a hardware identifier for alias lookup."""
+
     name = raw.strip().lower().replace("-", "_")
     name = name.replace(" ", "")
     return name
 
 
 def resolve_hardware(name: str) -> Tuple[str, FlashRegion]:
+    """Resolve a hardware identifier to a known INAV flash region."""
+
     normalized = normalize_hw_name(name)
     key = HARDWARE_ALIASES.get(normalized, normalized)
     region = CONFIG_REGIONS.get(key)
     if not region:
-        raise KeyError(f"Unsupported hardware identifier '{name}'. Use --list to see options.")
+        raise KeyError(
+            f"Unsupported hardware identifier '{name}'. Use --list to see options."
+        )
     return key, region
 
 
-def parse_int(value: str) -> int:
-    try:
-        return int(value, 0)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"Invalid integer literal: {value}") from exc
-
-
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Extract the FLASH_CONFIG block from an STM32 ROM dump"
+    """Build the shared CLI parser for the INAV extractor."""
+
+    return build_extract_parser(
+        description="Extract the FLASH_CONFIG block from an STM32 ROM dump",
+        hardware_help="Hardware identifier, e.g. f722 or f745_bl",
     )
-    parser.add_argument("dump", nargs="?", help="Path to the ROM dump (binary file)")
-    parser.add_argument("hardware", nargs="?", help="Hardware identifier, e.g. f722 or f745_bl")
-    parser.add_argument(
-        "-o",
-        "--output",
-        help="Output file for the extracted config (default: <dump>_flash_config_<hw>.bin)",
-    )
-    parser.add_argument(
-        "--base-address",
-        type=parse_int,
-        default=0x08000000,
-        help="Base address that corresponds to offset 0 in the dump (default: 0x08000000)",
-    )
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        help="List supported hardware identifiers and exit",
-    )
-    return parser
 
 
 def list_hardware() -> None:
+    """Print the supported INAV hardware identifiers."""
+
     print("Supported hardware identifiers:")
     for key in sorted(CONFIG_REGIONS):
         region = CONFIG_REGIONS[key]
-        print(f"  {key:10s} origin=0x{region.origin:08X} size={region.length:6d} bytes ({region.note})")
-
-
-def extract_region(dump_path: Path, offset: int, length: int) -> bytes:
-    with dump_path.open("rb") as handle:
-        handle.seek(0, os.SEEK_END)
-        dump_size = handle.tell()
-        if offset < 0:
-            raise ValueError("Computed offset is negative; check the base address argument.")
-        if offset + length > dump_size:
-            raise ValueError(
-                f"Dump is too small: need {offset + length} bytes but file is {dump_size} bytes."
-            )
-        handle.seek(offset)
-        return handle.read(length)
+        print(
+            f"  {key:10s} origin=0x{region.origin:08X} "
+            f"size={region.length:6d} bytes ({region.note})"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the CLI entry point."""
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -150,26 +137,21 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dump or not args.hardware:
         parser.error("dump path and hardware identifier are required unless --list is used")
 
-    dump_path = Path(args.dump).expanduser()
-    if not dump_path.is_file():
-        parser.error(f"Dump file not found: {dump_path}")
+    dump_path = resolve_dump_path(
+        args.dump,
+        parser,
+        expanduser=True,
+        missing_message="Dump file not found: {path}",
+    )
 
     hw_key, region = resolve_hardware(args.hardware)
 
     offset = region.origin - args.base_address
+    output_path = resolve_output_path(dump_path, args.output, hw_key)
     try:
-        data = extract_region(dump_path, offset, region.length)
+        copy_region(dump_path, offset, region.length, output_path)
     except ValueError as exc:
         parser.error(str(exc))
-
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        output_name = f"{dump_path.stem}_flash_config_{hw_key}.bin"
-        output_path = dump_path.with_name(output_name)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(data)
     print(
         f"Wrote {region.length} bytes from 0x{region.origin:08X} to {output_path} "
         f"(offset {offset:#x} within the dump)"

@@ -8,15 +8,22 @@ Usage:
 Example:
     python beta_extract_flash.py quad_dump.bin F722RE
         => quad_dump_flash_config_f722.bin
-"""
 
-import argparse
-import os
+author = "CIRCL https://www.circl.lu/"
+license = "GNU Affero General Public Licence https://www.gnu.org/licenses/agpl-3.0.en.html"
+"""
+# pylint: disable=duplicate-code
+
 import re
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable, List, Tuple
+
+from lib.flash_extract_common import (
+    build_extract_parser,
+    copy_region,
+    resolve_dump_path,
+    resolve_output_path,
+)
 
 
 @dataclass(frozen=True)
@@ -26,56 +33,270 @@ class Layout:
     config_start: int
     config_size: int
     flash_base: int = 0x08000000
+    source: str = ""
     note: str | None = None
 
     @property
     def offset(self) -> int:
+        """Return the dump offset that corresponds to the config region."""
+
         return self.config_start - self.flash_base
 
 
 # Ordered from most specific to most generic so substring matching picks the right layout.
 KNOWN_LAYOUTS: List[Tuple[str, Layout]] = [
-    ("h7a3", Layout(0x08020000, 0x4000, note="STM32H7A3 2MB (8KB sectors, config spans 2 of them)")),
-    ("h735", Layout(0x08020000, 0x20000, note="STM32H735/H725 1MB")),
-    ("h725", Layout(0x08020000, 0x20000)),
-    ("h723", Layout(0x08020000, 0x20000, note="STM32H723/H725 1MB")),
-    ("h743", Layout(0x08020000, 0x20000, note="STM32H743/H750 2MB")),
-    ("h563", Layout(0x08020000, 0x20000, note="STM32H563 2MB flash")),
-    ("h5", Layout(0x08020000, 0x20000, note="Generic STM32H5 family (verify before use)")),
-    ("f765", Layout(0x08008000, 0x8000, note="STM32F765/F767 2MB flash")),
-    ("f767", Layout(0x08008000, 0x8000)),
-    ("f746", Layout(0x08008000, 0x8000, note="STM32F745/F746/F74x 1MB flash")),
-    ("f745", Layout(0x08008000, 0x8000)),
-    ("f74", Layout(0x08008000, 0x8000, note="Generic STM32F74x/F75x")),
-    ("f7x5", Layout(0x08008000, 0x8000, note="STM32F7x5 family")),
-    ("f722", Layout(0x08004000, 0x4000, note="STM32F72x (sector 1 = 16KB)")),
-    ("f72", Layout(0x08004000, 0x4000)),
-    ("g474", Layout(0x08004000, 0x2000, note="STM32G474/G473 (8KB config)")),
-    ("g473", Layout(0x08004000, 0x2000)),
-    ("g4", Layout(0x08004000, 0x2000, note="Generic STM32G4 (verify sector size)")),
-    ("f446", Layout(0x08004000, 0x4000)),
-    ("f411", Layout(0x08004000, 0x4000)),
-    ("f405", Layout(0x08004000, 0x4000)),
-    ("f401", Layout(0x08004000, 0x4000)),
-    ("f4", Layout(0x08004000, 0x4000, note="Generic STM32F4 (sector 1 = 16KB)")),
+    (
+        "h7a3",
+        Layout(
+            0x08020000,
+            0x4000,
+            source="stm32_flash_h7a3_2m.ld",
+            note="TARGET_MCU STM32H7A3xx/STM32H7A3xxQ; FLASH_CONFIG is 16K (2 x 8K sectors)",
+        ),
+    ),
+    (
+        "h735",
+        Layout(
+            0x08020000,
+            0x20000,
+            source="stm32_flash_h735_1m.ld",
+            note="TARGET_MCU STM32H735xx",
+        ),
+    ),
+    (
+        "h725",
+        Layout(
+            0x08020000,
+            0x20000,
+            source="stm32_flash_h723_1m.ld",
+            note="TARGET_MCU STM32H725xx shares the H723 1MB linker layout",
+        ),
+    ),
+    (
+        "h723",
+        Layout(
+            0x08020000,
+            0x20000,
+            source="stm32_flash_h723_1m.ld",
+            note="TARGET_MCU STM32H723xx",
+        ),
+    ),
+    (
+        "h743",
+        Layout(
+            0x08020000,
+            0x20000,
+            source="stm32_flash_h743_2m.ld",
+            note="TARGET_MCU STM32H743xx",
+        ),
+    ),
+    (
+        "h563",
+        Layout(
+            0x08020000,
+            0x20000,
+            source="stm32_flash_h563_2m.ld",
+            note="TARGET_MCU STM32H563xx",
+        ),
+    ),
+    (
+        "h5",
+        Layout(
+            0x08020000,
+            0x20000,
+            source="stm32_flash_h563_2m.ld",
+            note="generic H5 fallback based on the only H5 linker script in Betaflight",
+        ),
+    ),
+    (
+        "f765",
+        Layout(
+            0x08008000,
+            0x8000,
+            source="stm32_flash_f765.ld",
+            note="TARGET_MCU STM32F765xx",
+        ),
+    ),
+    (
+        "f767",
+        Layout(
+            0x08008000,
+            0x8000,
+            source="stm32_flash_f765.ld",
+            note="alias using the STM32F765xx linker layout",
+        ),
+    ),
+    (
+        "f746",
+        Layout(
+            0x08008000,
+            0x8000,
+            source="stm32_flash_f74x.ld",
+            note="TARGET_MCU STM32F746xx",
+        ),
+    ),
+    (
+        "f745",
+        Layout(
+            0x08008000,
+            0x8000,
+            source="stm32_flash_f74x.ld",
+            note="TARGET_MCU STM32F745xx",
+        ),
+    ),
+    (
+        "f74",
+        Layout(
+            0x08008000,
+            0x8000,
+            source="stm32_flash_f74x.ld",
+            note="generic alias for the STM32F745xx/STM32F746xx layout",
+        ),
+    ),
+    (
+        "f7x5",
+        Layout(
+            0x08008000,
+            0x8000,
+            source="stm32_flash_f74x.ld",
+            note="generic F7x5 fallback using the F74x Betaflight linker layout",
+        ),
+    ),
+    (
+        "f722",
+        Layout(
+            0x08004000,
+            0x4000,
+            source="stm32_flash_f722.ld",
+            note="TARGET_MCU STM32F722xx; config occupies the whole 16K flash sector 1",
+        ),
+    ),
+    (
+        "f72",
+        Layout(
+            0x08004000,
+            0x4000,
+            source="stm32_flash_f722.ld",
+            note="generic alias using the STM32F722xx linker layout",
+        ),
+    ),
+    (
+        "g474",
+        Layout(
+            0x08004000,
+            0x2000,
+            source="stm32_flash_g474.ld",
+            note="TARGET_MCU STM32G474xx",
+        ),
+    ),
+    (
+        "g473",
+        Layout(
+            0x08004000,
+            0x2000,
+            source="stm32_flash_g474.ld",
+            note="Betaflight STM32G47X target identifies as G473 but uses the G474 linker script",
+        ),
+    ),
+    (
+        "g4",
+        Layout(
+            0x08004000,
+            0x2000,
+            source="stm32_flash_g474.ld",
+            note="generic G4 fallback based on the Betaflight STM32G474xx linker layout",
+        ),
+    ),
+    (
+        "f446",
+        Layout(
+            0x08004000,
+            0x4000,
+            source="stm32_flash_f446.ld",
+            note="TARGET_MCU STM32F446xx",
+        ),
+    ),
+    (
+        "f411",
+        Layout(
+            0x08004000,
+            0x4000,
+            source="stm32_flash_f411.ld",
+            note="TARGET_MCU STM32F411xE",
+        ),
+    ),
+    (
+        "f405",
+        Layout(
+            0x08004000,
+            0x4000,
+            source="stm32_flash_f405.ld",
+            note="TARGET_MCU STM32F405xx",
+        ),
+    ),
+    (
+        "f401",
+        Layout(
+            0x08004000,
+            0x4000,
+            source="stm32_flash_f411.ld",
+            note="generic F401 fallback using the 16K sector-1 F4 layout",
+        ),
+    ),
+    (
+        "f4",
+        Layout(
+            0x08004000,
+            0x4000,
+            source="stm32_flash_f411.ld",
+            note="generic F4 fallback using Betaflight's 16K sector-1 F4 linker layout",
+        ),
+    ),
 ]
 
 
 def normalize_model(model: str) -> str:
+    """Normalize a user-supplied MCU identifier for substring matching."""
+
     model = model.lower()
     model = model.replace("stm32", "")
     return re.sub(r"[^a-z0-9]", "", model)
 
 
-def list_supported_models() -> Iterable[str]:
+def iter_supported_layouts() -> Iterable[Tuple[str, Layout]]:
+    """Yield unique layout patterns in display order."""
+
     seen = set()
-    for pattern, _layout in KNOWN_LAYOUTS:
+    for pattern, layout in KNOWN_LAYOUTS:
         if pattern not in seen:
             seen.add(pattern)
-            yield pattern
+            yield pattern, layout
+
+
+def list_supported_models() -> Iterable[str]:
+    """Yield the supported normalized hardware identifiers."""
+
+    for pattern, _layout in iter_supported_layouts():
+        yield pattern
+
+
+def list_hardware() -> None:
+    """Print the supported Betaflight hardware identifiers."""
+
+    print("Supported hardware identifiers:")
+    for pattern, layout in iter_supported_layouts():
+        detail = layout.source
+        if layout.note:
+            detail = f"{detail}; {layout.note}"
+        print(
+            f"  {pattern:10s} origin=0x{layout.config_start:08X} "
+            f"size={layout.config_size:6d} bytes ({detail})"
+        )
 
 
 def find_layout(model: str) -> Tuple[str, Layout]:
+    """Resolve a user model string to the best-known layout entry."""
+
     normalized = normalize_model(model)
     for pattern, layout in KNOWN_LAYOUTS:
         if pattern in normalized:
@@ -86,95 +307,44 @@ def find_layout(model: str) -> Tuple[str, Layout]:
     )
 
 
-def extract_region(
-    dump_path: Path,
-    layout: Layout,
-    output_path: Path,
-) -> None:
-    size = os.path.getsize(dump_path)
-    offset = layout.offset
-    end = offset + layout.config_size
-    if offset < 0:
-        raise ValueError(
-            f"Computed negative offset (start {hex(layout.config_start)} < base {hex(layout.flash_base)})"
-        )
-    if end > size:
-        raise ValueError(
-            f"Dump '{dump_path}' is only {size} bytes, but need up to {end} bytes "
-            f"to reach config region (offset {hex(offset)}, size {layout.config_size})."
-        )
-
-    with dump_path.open("rb") as src, output_path.open("wb") as dst:
-        src.seek(offset)
-        remaining = layout.config_size
-        while remaining:
-            chunk = src.read(min(remaining, 1024 * 1024))
-            if not chunk:
-                raise IOError("Unexpected end of file while reading config region")
-            dst.write(chunk)
-            remaining -= len(chunk)
-
-
 def main(argv: List[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Extract the Betaflight config (EEPROM emulation) from an STM32 flash dump."
-    )
-    parser.add_argument(
-        "dump",
-        nargs="?",
-        help="Path to the raw flash dump file (starts at 0x08000000).",
-    )
-    parser.add_argument(
-        "model",
-        nargs="?",
-        help="STM32 model (e.g. F722, STM32F765, H743).",
-    )
-    parser.add_argument(
-        "--flash-base",
-        default="0x08000000",
-        help="Override the flash base address used for the dump (default: 0x08000000).",
-    )
-    parser.add_argument(
-        "--output",
-        help="Optional custom output path. If omitted, derives '<dump>_flash_config_<model>.bin'.",
-    )
-    parser.add_argument(
-        "--list",
-        action="store_true",
-        help="List recognised STM32 model patterns and exit.",
+    """Run the CLI entry point."""
+
+    parser = build_extract_parser(
+        description="Extract the Betaflight config (EEPROM emulation) from an STM32 flash dump.",
+        hardware_help="Hardware identifier, e.g. f722 or f745.",
     )
     args = parser.parse_args(argv)
 
     if args.list:
-        for pattern in list_supported_models():
-            print(pattern)
+        list_hardware()
         return 0
 
-    if not args.dump or not args.model:
-        parser.error("dump and model are required unless --list-models is used.")
+    if not args.dump or not args.hardware:
+        parser.error("dump path and hardware identifier are required unless --list is used")
 
-    dump_path = Path(args.dump)
-    if not dump_path.is_file():
-        parser.error(f"Dump file '{dump_path}' does not exist.")
+    dump_path = resolve_dump_path(
+        args.dump,
+        parser,
+        expanduser=False,
+        missing_message="Dump file '{path}' does not exist.",
+    )
 
-    base_addr = int(args.flash_base, 0)
-    model_pattern, layout = find_layout(args.model)
+    base_addr = args.base_address
+    model_pattern, layout = find_layout(args.hardware)
     if layout.flash_base != base_addr:
         layout = Layout(
             config_start=layout.config_start - layout.flash_base + base_addr,
             config_size=layout.config_size,
             flash_base=base_addr,
+            source=layout.source,
             note=layout.note,
         )
 
-    model_token = normalize_model(args.model) or model_pattern
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        output_name = f"{dump_path.stem}_flash_config_{model_token}.bin"
-        output_path = dump_path.with_name(output_name)
+    model_token = normalize_model(args.hardware) or model_pattern
+    output_path = resolve_output_path(dump_path, args.output, model_token)
 
-    extract_region(dump_path, layout, output_path)
+    copy_region(dump_path, layout.offset, layout.config_size, output_path)
 
     print(
         f"Wrote {layout.config_size} bytes from offset 0x{layout.offset:X} "
@@ -186,4 +356,4 @@ def main(argv: List[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

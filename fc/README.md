@@ -1,51 +1,162 @@
-This folder contains tooling for analysing Flight Controller Firmware.
+# Flight Controller Firmware Analysis
 
-Work on ;
-Betaflight
-iNav
+This directory contains tools for analyzing flight controller firmware dumps.
 
-# Configuration extraction
-Step 1 detect Operating system and Hardware from the chip dump.
+Supported targets:
+
+- Betaflight
+- INAV
+- ArduPilot (partial support)
+
+## Overview
+
+Many DIY and commercial drones use STM32-based flight controllers, most often
+from the STM32F4 and STM32F7 families. Because each board can use a different
+memory layout and flash size, the controller model must be identified before
+extracting configuration data from a dump.
+
+The workflow provided here helps you:
+
+1. Identify the flight controller operating system.
+2. Identify the target platform and microcontroller.
+3. Extract the configuration area from the memory dump.
+4. Decode the extracted configuration.
+
+Currently, the tooling can recover:
+
+- Craft name
+- Pilot name
+- Saved waypoints
+
+## YARA Rules
+
+The YARA rules are stored in [`fc/yara/`](./yara).
+
+- `drones_operating.yara`: identify the FC firmware family
+- `drones_inav_firmwares.yara`: identify INAV targets and chipsets
+- `drones_betaflight_firmwares.yara`: identify Betaflight targets and chipsets
+- `drones_ardupilot_firmwares.yara`: identify ArduPilot targets and chipsets
+
+## Example Workflow
+
+The commands below are intended to be run from the repository root.
+
+### 1. Determine the operating system
+
+Use the operating system detection rule:
+
+```bash
+yr scan fc/yara/drones_operating.yara fc/samples/sample_01.dump --output-format json
 ```
-$ yara yara/drones_firmwares.yara samples/sample 
-DAKEFPVF722_STM32F7X2 samples/sample
-INAV_FC samples/sample
+
+Example output:
+
+```json
+{
+  "version": "1.14.0",
+  "matches": [
+    {
+      "rule": "INAV_FC",
+      "file": "/home/thanat0s/Forensic/drones/Drone-Forensic/fc/samples/sample_01.dump"
+    }
+  ]
+}
 ```
 
-Here we have a FC with a STM32F7 chipset running on INAV Flight controller.
+This sample matches `INAV_FC`, so the dump comes from an INAV-based flight
+controller.
 
-Step 2, from the FC dump, we will extract the configuration.
-$ ./src/inav_extract_flash.py -o flash ./samples/sample f722
-Wrote 16384 bytes from 0x08004000 to flash (offset 0x4000 within the dump)
+### 2. Determine the microcontroller model and target
 
+Use the INAV firmware rule set:
+
+```bash
+yr scan fc/yara/drones_inav_firmwares.yara fc/samples/sample_01.dump --output-format json -m
 ```
-$ ./src/inav_extract_flash.py -o flash ./samples/sample f722
-Wrote 16384 bytes from 0x08004000 to flash (offset 0x4000 within the dump)
+
+Example output:
+
+```json
+{
+  "version": "1.14.0",
+  "matches": [
+    {
+      "rule": "DAKEFPVF722_STM32F722",
+      "file": "/home/thanat0s/Forensic/drones/Drone-Forensic/fc/samples/sample_01.dump",
+      "meta": {
+        "target": "DAKEFPVF722",
+        "detection_source": "inav-target",
+        "chipset": "STM32F722",
+        "build_macro": "target_stm32f722xe"
+      }
+    },
+    {
+      "rule": "SITL_SITL",
+      "file": "/home/thanat0s/Forensic/drones/Drone-Forensic/fc/samples/sample_01.dump",
+      "meta": {
+        "build_macro": "target_sitl",
+        "target": "SITL",
+        "chipset": "SITL",
+        "detection_source": "inav-target"
+      }
+    }
+  ]
+}
 ```
 
-Now we will extract the conf from the flash.
+In this case, the relevant match is `STM32F722`, so the dump belongs to an
+INAV flight controller running on an STM32F7-family MCU.
 
+### 3. Extract the configuration block
+
+Extract the `FLASH_CONFIG` region from the dump:
+
+```bash
+python3 fc/src/inav_extract_flash.py -o /tmp/fc_flash.bin fc/samples/sample_01.dump f722
 ```
-./src/inav_dump_config.py flash
-....
-Summary:
-  Craft name : MK2
-  Pilot name : VIKTOR
-  Mission waypoints:
-    WP01 WAYPOINT  lat +49.5359170, lon +5.8349934, alt 25.00 m
-    WP02 WAYPOINT  lat +49.5371299, lon +5.8333518, alt 50.00 m
-    WP03 WAYPOINT  lat +49.5386518, lon +5.8322395, alt 50.00 m
-    WP04 WAYPOINT  lat +49.5402224, lon +5.8324374, alt 50.00 m
-    WP05 WAYPOINT  lat +49.5415996, lon +5.8336908, alt 50.00 m
-    WP06 WAYPOINT  lat +49.5424524, lon +5.8368470, alt 50.00 m
-    WP07 WAYPOINT  lat +49.5373161, lon +5.8390343, alt 50.00 m
-    WP08 JUMP      lat +0.0000000, lon +0.0000000, alt 0.00 m
-    WP09 WAYPOINT  lat +49.5329472, lon +5.8433666, alt 50.00 m
-    WP10 WAYPOINT  lat +49.5324095, lon +5.8421558, alt 50.00 m
-    WP11 WAYPOINT  lat +49.5320519, lon +5.8412199, alt 50.00 m
-    WP12 WAYPOINT  lat +49.5310903, lon +5.8399956, alt 50.00 m
-    WP13 WAYPOINT  lat +49.5317409, lon +5.8376345, alt 50.00 m
-    WP14 WAYPOINT  lat +49.5335528, lon +5.8351775, alt 50.00 m
-    WP15 WAYPOINT  lat +49.5356726, lon +5.8358011, alt 50.00 m
-GPX export : waypoints.gpx
-``
+
+Example output:
+
+```text
+Wrote 16384 bytes from 0x08004000 to /tmp/fc_flash.bin (offset 0x4000 within the dump)
+```
+
+To see the supported hardware identifiers:
+
+```bash
+python3 fc/src/inav_extract_flash.py --list
+```
+
+### 4. Decode the extracted configuration
+
+Decode the extracted block:
+
+```bash
+python3 fc/src/inav_dump_config.py /tmp/fc_flash.bin
+```
+
+Example output:
+
+```text
+Results:
+  Craft name    : MK2
+  Pilot name    : VIKTOR
+  MD5           : 588de5b6b6c3d5b130d0c44ab0d9f807
+  SHA256        : 1643a2125ff0f1ecfc7ffaafb3296247a109b1dd19cd9bce7f4b5872803eee37
+  Waypoint count: 15
+  GPX export    : waypoints.gpx
+```
+
+## Notes
+
+- Different controllers may require different extraction parameters.
+- Some platforms are only partially supported.
+- For INAV, use `--verbose` or `--json` on `inav_dump_config.py` for a more
+  detailed report.
+
+## Author and License
+
+This tooling is developed by CIRCL Luxembourg www.circl.lu.
+
+This project is licensed under the GNU Affero General Public License v3.0
+(AGPL-3.0). See the repository [`LICENSE`](../LICENSE) file for details.

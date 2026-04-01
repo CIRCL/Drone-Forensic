@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
+"""Decode an INAV FLASH_CONFIG dump and extract names plus mission data.
+
+author = "CIRCL https://www.circl.lu/"
+license = "GNU Affero General Public Licence https://www.gnu.org/licenses/agpl-3.0.en.html"
 """
-Decode an INAV FLASH_CONFIG binary 
-Extract Pilot and UAV name
-Extract flight coordinates
-"""
+# pylint: disable=duplicate-code
 
 import argparse
+import hashlib
+import json
 import re
 import struct
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
+from lib.c_header_constants import load_integer_constants
 
 CONFIG_FOOTER_TERMINATOR = 0
 CONFIG_RECORD_HEADER_SIZE = 6  # sizeof(configRecord_t)
@@ -23,10 +27,11 @@ CLASSIFICATION_NAMES = {
     3: "profile 3",
 }
 
-PG_SYSTEM_CONFIG = 18
-PG_WAYPOINT_MISSION_STORAGE = 1007
+DEFAULT_PG_SYSTEM_CONFIG = 18
+DEFAULT_PG_WAYPOINT_MISSION_STORAGE = 1007
+DEFAULT_MAX_NAME_LENGTH = 16
 
-NAV_WP_ACTION_NAMES = {
+DEFAULT_NAV_WP_ACTION_NAMES = {
     1: "WAYPOINT",
     3: "HOLD_TIME",
     4: "RTH",
@@ -36,12 +41,17 @@ NAV_WP_ACTION_NAMES = {
     8: "LAND",
 }
 
-NAV_WP_FLAG_LAST = 0xA5
-DEFAULT_PG_HEADER = Path(__file__).resolve().parent / "inav_parameter_group_ids.h"
+DEFAULT_NAV_WP_FLAG_LAST = 0xA5
+DEFAULT_INCLUDE_DIR = Path(__file__).resolve().parent / "c_includes"
+DEFAULT_PG_HEADER = DEFAULT_INCLUDE_DIR / "inav_parameter_group_ids.h"
+DEFAULT_CONFIG_HEADER = DEFAULT_INCLUDE_DIR / "inav_config.h"
+DEFAULT_NAVIGATION_HEADER = DEFAULT_INCLUDE_DIR / "inav_navigation.h"
 
 
 @dataclass
 class ConfigRecord:
+    """One persisted parameter-group record from the INAV dump."""
+
     offset: int
     size: int
     pgn: int
@@ -52,6 +62,8 @@ class ConfigRecord:
 
 @dataclass
 class ConfigDump:
+    """Parsed INAV config dump with records and CRC metadata."""
+
     format_version: int
     records: List[ConfigRecord]
     footer_offset: int
@@ -60,23 +72,24 @@ class ConfigDump:
 
 
 @dataclass
-class Waypoint:
+class Waypoint:  # pylint: disable=too-many-instance-attributes
+    """Decoded mission waypoint entry."""
+
     index: int
     lat: int
     lon: int
     alt: int
     action: int
+    action_name: str
     p1: int
     p2: int
     p3: int
     flag: int
 
-    @property
-    def action_name(self) -> str:
-        return NAV_WP_ACTION_NAMES.get(self.action, f"ACTION_{self.action}")
-
 
 def crc16_ccitt(data: bytes, initial: int = 0) -> int:
+    """Compute the CRC-16/CCITT value used by INAV config dumps."""
+
     crc = initial & 0xFFFF
     for byte in data:
         crc ^= byte << 8
@@ -89,6 +102,8 @@ def crc16_ccitt(data: bytes, initial: int = 0) -> int:
 
 
 def parse_config_dump(blob: bytes) -> ConfigDump:
+    """Parse a raw INAV FLASH_CONFIG blob into structured records."""
+
     if not blob:
         raise ValueError("Empty configuration blob")
 
@@ -135,6 +150,8 @@ def parse_config_dump(blob: bytes) -> ConfigDump:
 
 
 def format_hexdump(data: bytes, width: int = 16) -> str:
+    """Format a byte string as a compact hex and ASCII dump."""
+
     if not data:
         return "    (empty)"
     lines: List[str] = []
@@ -147,10 +164,12 @@ def format_hexdump(data: bytes, width: int = 16) -> str:
 
 
 def load_pgn_map(header_path: Path) -> Dict[int, str]:
+    """Load numeric PG identifiers from the local INAV header."""
+
     pattern = re.compile(r"#define\s+(PG_[A-Za-z0-9_]+)\s+([0-9]+)")
     mapping: Dict[int, str] = {}
     try:
-        text = header_path.read_text()
+        text = header_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return mapping
     for line in text.splitlines():
@@ -167,6 +186,8 @@ def load_pgn_map(header_path: Path) -> Dict[int, str]:
 
 
 def describe_flags(flags: int) -> str:
+    """Render record classification flags as human-readable text."""
+
     classification = flags & 0x3
     class_desc = CLASSIFICATION_NAMES.get(classification, f"unknown ({classification})")
     other_flags = flags & ~0x3
@@ -175,10 +196,165 @@ def describe_flags(flags: int) -> str:
     return class_desc
 
 
-def generate_report(
-    dump: ConfigDump, pgn_map: Dict[int, str]
+def load_runtime_constants(
+    pg_header_path: Path,
+    config_header_path: Optional[Path],
+    navigation_header_path: Optional[Path],
+) -> Tuple[int, int, int, int, int, Dict[int, str]]:
+    """Load PG and navigation constants from the bundled C headers."""
+
+    pg_constants = load_integer_constants(pg_header_path)
+    system_config_pgn = pg_constants.get("PG_SYSTEM_CONFIG", DEFAULT_PG_SYSTEM_CONFIG)
+    waypoint_storage_pgn = pg_constants.get(
+        "PG_WAYPOINT_MISSION_STORAGE",
+        DEFAULT_PG_WAYPOINT_MISSION_STORAGE,
+    )
+
+    max_name_length = DEFAULT_MAX_NAME_LENGTH
+    if config_header_path and config_header_path.exists():
+        config_constants = load_integer_constants(config_header_path)
+        max_name_length = config_constants.get("MAX_NAME_LENGTH", max_name_length)
+
+    nav_wp_flag_last = DEFAULT_NAV_WP_FLAG_LAST
+    nav_wp_action_rth = 4
+    nav_wp_action_names = dict(DEFAULT_NAV_WP_ACTION_NAMES)
+    if navigation_header_path and navigation_header_path.exists():
+        nav_constants = load_integer_constants(navigation_header_path)
+        nav_wp_flag_last = nav_constants.get("NAV_WP_FLAG_LAST", nav_wp_flag_last)
+        nav_wp_action_rth = nav_constants.get("NAV_WP_ACTION_RTH", nav_wp_action_rth)
+        action_names = {
+            value: name.removeprefix("NAV_WP_ACTION_")
+            for name, value in nav_constants.items()
+            if name.startswith("NAV_WP_ACTION_")
+        }
+        if action_names:
+            nav_wp_action_names = action_names
+
+    return (
+        system_config_pgn,
+        waypoint_storage_pgn,
+        max_name_length,
+        nav_wp_flag_last,
+        nav_wp_action_rth,
+        nav_wp_action_names,
+    )
+
+
+def compute_file_hashes(data: bytes) -> Tuple[str, str]:
+    """Return MD5 and SHA-256 hashes for the supplied dump bytes."""
+
+    return hashlib.md5(data).hexdigest(), hashlib.sha256(data).hexdigest()
+
+
+def serialize_waypoint(waypoint: Waypoint) -> Dict[str, object]:
+    """Convert a waypoint dataclass into a JSON-serializable mapping."""
+
+    return {
+        "index": waypoint.index,
+        "action": waypoint.action,
+        "action_name": waypoint.action_name,
+        "latitude": waypoint.lat / 1e7,
+        "longitude": waypoint.lon / 1e7,
+        "altitude_m": waypoint.alt / 100.0,
+        "p1": waypoint.p1,
+        "p2": waypoint.p2,
+        "p3": waypoint.p3,
+        "flag": waypoint.flag,
+    }
+
+
+def build_result(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    craft_name: Optional[str],
+    pilot_name: Optional[str],
+    waypoints: List[Waypoint],
+    file_md5: str,
+    file_sha256: str,
+    gpx_output: Optional[str] = None,
+) -> Dict[str, object]:
+    """Build the normalized result payload shared by all output modes."""
+
+    result: Dict[str, object] = {
+        "craft_name": craft_name or "(unknown)",
+        "pilot_name": pilot_name or "(unknown)",
+        "md5": file_md5,
+        "sha256": file_sha256,
+        "waypoint_count": len(waypoints),
+        "waypoints": [serialize_waypoint(waypoint) for waypoint in waypoints],
+    }
+    if gpx_output:
+        result["gpx_output"] = gpx_output
+    return result
+
+
+def generate_summary(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    craft_name: Optional[str],
+    pilot_name: Optional[str],
+    waypoints: List[Waypoint],
+    file_md5: str,
+    file_sha256: str,
+    gpx_output: Optional[str] = None,
+) -> str:
+    """Render the default human-readable result block."""
+
+    result = build_result(
+        craft_name,
+        pilot_name,
+        waypoints,
+        file_md5,
+        file_sha256,
+        gpx_output,
+    )
+    lines = [
+        "Results:",
+        f"  Craft name    : {result['craft_name']}",
+        f"  Pilot name    : {result['pilot_name']}",
+        f"  MD5           : {result['md5']}",
+        f"  SHA256        : {result['sha256']}",
+        f"  Waypoint count: {result['waypoint_count']}",
+    ]
+    if gpx_output:
+        lines.append(f"  GPX export    : {gpx_output}")
+    return "\n".join(lines) + "\n"
+
+
+def generate_json_result(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    craft_name: Optional[str],
+    pilot_name: Optional[str],
+    waypoints: List[Waypoint],
+    file_md5: str,
+    file_sha256: str,
+    gpx_output: Optional[str] = None,
+) -> str:
+    """Render the extracted result as formatted JSON."""
+
+    result = build_result(
+        craft_name,
+        pilot_name,
+        waypoints,
+        file_md5,
+        file_sha256,
+        gpx_output,
+    )
+    return json.dumps(result, indent=2) + "\n"
+
+
+def generate_report(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    dump: ConfigDump,
+    pgn_map: Dict[int, str],
+    file_md5: str,
+    file_sha256: str,
+    system_config_pgn: int,
+    waypoint_storage_pgn: int,
+    max_name_length: int,
+    nav_wp_flag_last: int,
+    nav_wp_action_rth: int,
+    nav_wp_action_names: Dict[int, str],
 ) -> Tuple[str, Optional[str], Optional[str], List[Waypoint]]:
+    """Render the verbose INAV report and return extracted summary fields."""
+
     lines: List[str] = []
+    lines.append(f"File MD5            : {file_md5}")
+    lines.append(f"File SHA256         : {file_sha256}")
     lines.append(f"EEPROM format version: {dump.format_version}")
     lines.append(
         f"CRC check: computed 0x{dump.computed_crc:04X}, stored 0x{dump.checksum:04X}"
@@ -194,6 +370,8 @@ def generate_report(
     pilot_name: Optional[str] = None
     waypoints: List[Waypoint] = []
 
+    entry_len = max_name_length + 1
+
     for idx, record in enumerate(dump.records, start=1):
         pg_name = pgn_map.get(record.pgn, "(unknown PGN)")
         lines.append(
@@ -203,67 +381,87 @@ def generate_report(
             f"  Version {record.version}, classification: {describe_flags(record.flags)}"
         )
         lines.append(
-            f"  Payload size: {len(record.payload)} bytes (record size {record.size} bytes, offset 0x{record.offset:04X})"
+            "  Payload size: "
+            f"{len(record.payload)} bytes "
+            f"(record size {record.size} bytes, offset 0x{record.offset:04X})"
         )
-        if record.pgn == PG_SYSTEM_CONFIG and len(record.payload) >= 34:
-            craft_name = record.payload[-34:-17].split(b"\x00", 1)[0].decode(
+        if record.pgn == system_config_pgn and len(record.payload) >= entry_len * 2:
+            craft_name = record.payload[-entry_len * 2 : -entry_len].split(
+                b"\x00", 1
+            )[0].decode(
                 "utf-8", "ignore"
             )
-            pilot_name = record.payload[-17:].split(b"\x00", 1)[0].decode(
+            pilot_name = record.payload[-entry_len:].split(b"\x00", 1)[0].decode(
                 "utf-8", "ignore"
             )
-        elif record.pgn == PG_WAYPOINT_MISSION_STORAGE:
-            waypoints = decode_waypoints(record.payload)
+        elif record.pgn == waypoint_storage_pgn:
+            waypoints = decode_waypoints(
+                record.payload,
+                nav_wp_flag_last,
+                nav_wp_action_rth,
+                nav_wp_action_names,
+            )
         lines.append(format_hexdump(record.payload))
         lines.append("")
 
     summary_needed = any([craft_name, pilot_name, waypoints])
     if summary_needed:
-        lines.append("Summary:")
-        if craft_name or pilot_name:
-            lines.append(f"  Craft name : {craft_name or '(unknown)'}")
-            lines.append(f"  Pilot name : {pilot_name or '(unknown)'}")
+        lines.append(
+            generate_summary(
+                craft_name,
+                pilot_name,
+                waypoints,
+                file_md5,
+                file_sha256,
+            ).rstrip()
+        )
         if waypoints:
             lines.append("  Mission waypoints:")
-            for wp in waypoints:
-                lat_deg = wp.lat / 1e7
-                lon_deg = wp.lon / 1e7
-                alt_m = wp.alt / 100.0
+            for waypoint in waypoints:
+                lat_deg = waypoint.lat / 1e7
+                lon_deg = waypoint.lon / 1e7
+                alt_m = waypoint.alt / 100.0
                 lines.append(
-                    f"    WP{wp.index:02d} {wp.action_name:<9} lat {lat_deg:+.7f}, "
-                    f"lon {lon_deg:+.7f}, alt {alt_m:.2f} m"
+                    f"    WP{waypoint.index:02d} {waypoint.action_name:<9} "
+                    f"lat {lat_deg:+.7f}, lon {lon_deg:+.7f}, alt {alt_m:.2f} m"
                 )
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n", craft_name, pilot_name, waypoints
 
 
-def decode_waypoints(payload: bytes) -> List[Waypoint]:
+def _is_empty_waypoint(lat: int, lon: int, alt: int, values: Tuple[int, ...]) -> bool:
+    """Return whether a waypoint slot is completely empty."""
+
+    return lat == 0 and lon == 0 and alt == 0 and all(value == 0 for value in values)
+
+
+def decode_waypoints(  # pylint: disable=too-many-locals
+    payload: bytes,
+    nav_wp_flag_last: int,
+    nav_wp_action_rth: int,
+    nav_wp_action_names: Dict[int, str],
+) -> List[Waypoint]:
+    """Decode serialized `navWaypoint_t` entries from the mission payload."""
+
     entry_size = 20
     if len(payload) % entry_size != 0:
-        raise ValueError("Waypoint payload size is not a multiple of waypoint entry size")
+        raise ValueError(
+            "Waypoint payload size is not a multiple of waypoint entry size"
+        )
     waypoints: List[Waypoint] = []
     count = len(payload) // entry_size
     for idx in range(count):
         chunk = payload[idx * entry_size : (idx + 1) * entry_size]
         lat, lon, alt, p1, p2, p3, action, flag = struct.unpack("<iii hhh BB", chunk)
-        if (
-            lat == 0
-            and lon == 0
-            and alt == 0
-            and p1 == 0
-            and p2 == 0
-            and p3 == 0
-            and action == 0
-            and flag == 0
-        ):  # empty slot
+        if _is_empty_waypoint(lat, lon, alt, (p1, p2, p3, action, flag)):
             continue
         if (
             lat == 0
             and lon == 0
             and alt == 0
-            and action == 4
-            and flag == NAV_WP_FLAG_LAST
+            and action == nav_wp_action_rth
+            and flag == nav_wp_flag_last
         ):
             break
         waypoints.append(
@@ -273,6 +471,7 @@ def decode_waypoints(payload: bytes) -> List[Waypoint]:
                 lon=lon,
                 alt=alt,
                 action=action,
+                action_name=nav_wp_action_names.get(action, f"ACTION_{action}"),
                 p1=p1,
                 p2=p2,
                 p3=p3,
@@ -288,6 +487,8 @@ def write_waypoints_gpx(
     craft_name: Optional[str],
     pilot_name: Optional[str],
 ) -> bool:
+    """Write decoded waypoints as a GPX track and waypoint set."""
+
     valid_waypoints = [wp for wp in waypoints if not (wp.lat == 0 and wp.lon == 0)]
     if not valid_waypoints:
         return False
@@ -302,7 +503,10 @@ def write_waypoints_gpx(
 
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        '<gpx version="1.1" creator="config_dump_to_text" xmlns="http://www.topografix.com/GPX/1/1">',
+        (
+            '<gpx version="1.1" creator="config_dump_to_text" '
+            'xmlns="http://www.topografix.com/GPX/1/1">'
+        ),
         "  <metadata>",
         f"    <name>{escape(title)}</name>",
         "  </metadata>",
@@ -342,6 +546,8 @@ def write_waypoints_gpx(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line interface parser."""
+
     parser = argparse.ArgumentParser(description="Decode INAV EEPROM/FLASH config dump")
     parser.add_argument("dump", help="Path to the raw FLASH_CONFIG binary")
     parser.add_argument(
@@ -351,45 +557,113 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--pg-header",
-        default=str(DEFAULT_PG_HEADER),
-        help="Path to parameter_group_ids.h for PGN names (defaults to ./inav_parameter_group_ids.h)",
+        default=None,
+        help="Path to parameter_group_ids.h for PGN names (auto-detected if omitted)",
     )
     parser.add_argument(
         "--gpx-output",
         default="waypoints.gpx",
         help="Path to write GPX data from decoded mission waypoints (empty to skip)",
     )
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show the full decoded report instead of only the summary",
+    )
+    output_group.add_argument(
+        "--json",
+        action="store_true",
+        help="Show the extracted result as JSON",
+    )
     return parser
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: List[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-branches
+    """Run the CLI entry point."""
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
     dump_path = Path(args.dump).expanduser()
     data = dump_path.read_bytes()
+    file_md5, file_sha256 = compute_file_hashes(data)
     config_dump = parse_config_dump(data)
 
-    pg_map = load_pgn_map(Path(args.pg_header))
-    report, craft_name, pilot_name, waypoints = generate_report(config_dump, pg_map)
+    if args.pg_header:
+        header_path = Path(args.pg_header).expanduser()
+    else:
+        header_path = DEFAULT_PG_HEADER
+    if not header_path.exists():
+        raise FileNotFoundError(
+            f"PG header file not found at {header_path} "
+            "(expected inav_parameter_group_ids.h)"
+        )
 
-    extra_notes: List[str] = []
-    gpx_path: Optional[Path] = None
+    (
+        system_config_pgn,
+        waypoint_storage_pgn,
+        max_name_length,
+        nav_wp_flag_last,
+        nav_wp_action_rth,
+        nav_wp_action_names,
+    ) = load_runtime_constants(
+        header_path,
+        DEFAULT_CONFIG_HEADER,
+        DEFAULT_NAVIGATION_HEADER,
+    )
+    pg_map = load_pgn_map(header_path)
+    report, craft_name, pilot_name, waypoints = generate_report(
+        config_dump,
+        pg_map,
+        file_md5,
+        file_sha256,
+        system_config_pgn,
+        waypoint_storage_pgn,
+        max_name_length,
+        nav_wp_flag_last,
+        nav_wp_action_rth,
+        nav_wp_action_names,
+    )
+
+    gpx_export: Optional[str] = None
     if args.gpx_output:
         gpx_path = Path(args.gpx_output).expanduser()
+    else:
+        gpx_path = None
     if gpx_path and waypoints:
         if write_waypoints_gpx(gpx_path, waypoints, craft_name, pilot_name):
-            extra_notes.append(f"GPX export : {gpx_path}")
+            gpx_export = str(gpx_path)
 
-    if extra_notes:
-        report = report.rstrip() + "\n" + "\n".join(extra_notes) + "\n"
+    if args.verbose:
+        output = report
+        if gpx_export:
+            output = output.rstrip() + f"\nGPX export : {gpx_export}\n"
+    elif args.json:
+        output = generate_json_result(
+            craft_name,
+            pilot_name,
+            waypoints,
+            file_md5,
+            file_sha256,
+            gpx_export,
+        )
+    else:
+        output = generate_summary(
+            craft_name,
+            pilot_name,
+            waypoints,
+            file_md5,
+            file_sha256,
+            gpx_export,
+        )
 
     if args.output:
         output_path = Path(args.output).expanduser()
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(report)
+        output_path.write_text(output, encoding="utf-8")
     else:
-        print(report, end="")
+        print(output, end="")
     return 0
 
 

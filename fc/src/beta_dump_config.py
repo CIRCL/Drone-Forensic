@@ -4,14 +4,21 @@ Decode a Betaflight FLASH_CONFIG binary and extract craft/pilot names.
 
 Supports legacy dumps (single name), 4.x releases (craft+pilot),
 and newer builds that append extra OSD message strings.
+
+author = "CIRCL https://www.circl.lu/"
+license = "GNU Affero General Public Licence https://www.gnu.org/licenses/agpl-3.0.en.html"
 """
+# pylint: disable=duplicate-code
 
 import argparse
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from lib.c_header_constants import load_integer_constants
 
 CONFIG_MAGIC = 0xBE
 CONFIG_RECORD_HEADER_SIZE = 6  # sizeof(configRecord_t)
@@ -26,19 +33,25 @@ CLASSIFICATION_NAMES = {
     3: "profile 3",
 }
 
-PG_PILOT_CONFIG = 47
-MAX_NAME_LENGTH = 16
-DEFAULT_PG_HEADER = Path(__file__).resolve().parent / "beta_pg_ids.h"
+DEFAULT_PG_PILOT_CONFIG = 47
+DEFAULT_MAX_NAME_LENGTH = 16
+DEFAULT_INCLUDE_DIR = Path(__file__).resolve().parent / "c_includes"
+DEFAULT_PG_HEADER = DEFAULT_INCLUDE_DIR / "beta_pg_ids.h"
+DEFAULT_PILOT_HEADER = DEFAULT_INCLUDE_DIR / "beta_pilot.h"
 
 
 @dataclass
 class ConfigHeader:
+    """Top-level header stored at the start of the config blob."""
+
     version: int
     magic: int
 
 
 @dataclass
 class ConfigRecord:
+    """One persisted parameter-group record from the dump."""
+
     offset: int
     size: int
     pgn: int
@@ -49,6 +62,8 @@ class ConfigRecord:
 
 @dataclass
 class ConfigDump:
+    """Parsed FLASH_CONFIG dump with header, records, and CRC metadata."""
+
     header: ConfigHeader
     records: List[ConfigRecord]
     footer_offset: int
@@ -57,10 +72,14 @@ class ConfigDump:
 
     @property
     def crc_ok(self) -> bool:
+        """Return whether the combined CRC matches the expected check value."""
+
         return self.combined_crc == CRC_CHECK_VALUE
 
 
 def crc16_ccitt(data: bytes, initial: int = CRC_START_VALUE) -> int:
+    """Compute a CRC-16/CCITT checksum for the provided byte sequence."""
+
     crc = initial & 0xFFFF
     for byte in data:
         crc ^= byte << 8
@@ -73,6 +92,8 @@ def crc16_ccitt(data: bytes, initial: int = CRC_START_VALUE) -> int:
 
 
 def parse_config_dump(blob: bytes) -> ConfigDump:
+    """Parse a raw Betaflight FLASH_CONFIG blob into structured records."""
+
     if len(blob) < 4:
         raise ValueError("Configuration blob is too short to contain header/footer")
 
@@ -132,10 +153,12 @@ def parse_config_dump(blob: bytes) -> ConfigDump:
 
 
 def load_pgn_map(header_path: Path) -> Dict[int, str]:
+    """Load `PG_*` numeric identifiers from a Betaflight header file."""
+
     pattern = re.compile(r"#define\s+(PG_[A-Za-z0-9_]+)\s+([0-9]+)")
     mapping: Dict[int, str] = {}
     try:
-        text = header_path.read_text()
+        text = header_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return mapping
     for line in text.splitlines():
@@ -152,6 +175,8 @@ def load_pgn_map(header_path: Path) -> Dict[int, str]:
 
 
 def describe_flags(flags: int) -> str:
+    """Render a human-readable description of the record classification flags."""
+
     classification = flags & 0x3
     class_desc = CLASSIFICATION_NAMES.get(classification, f"unknown ({classification})")
     other_flags = flags & ~0x3
@@ -161,6 +186,8 @@ def describe_flags(flags: int) -> str:
 
 
 def format_hexdump(data: bytes, width: int = 16) -> str:
+    """Format bytes as a compact hex+ASCII dump."""
+
     if not data:
         return "    (empty)"
     lines: List[str] = []
@@ -173,11 +200,32 @@ def format_hexdump(data: bytes, width: int = 16) -> str:
 
 
 def _decode_string(field: bytes) -> Optional[str]:
+    """Decode a NUL-terminated UTF-8 field and normalize empty values."""
+
     text = field.split(b"\x00", 1)[0].decode("utf-8", "ignore").strip()
     return text or None
 
 
-def decode_names(payload: bytes, record_version: int) -> Tuple[Optional[str], Optional[str]]:
+def load_runtime_constants(
+    pg_header_path: Path,
+    pilot_header_path: Optional[Path],
+) -> Tuple[int, int]:
+    """Load PG and pilot-name constants from the bundled Betaflight headers."""
+
+    constants = load_integer_constants(pg_header_path)
+    pilot_config_pgn = constants.get("PG_PILOT_CONFIG", DEFAULT_PG_PILOT_CONFIG)
+    max_name_length = DEFAULT_MAX_NAME_LENGTH
+    if pilot_header_path and pilot_header_path.exists():
+        pilot_constants = load_integer_constants(pilot_header_path)
+        max_name_length = pilot_constants.get("MAX_NAME_LENGTH", max_name_length)
+    return pilot_config_pgn, max_name_length
+
+
+def decode_names(
+    payload: bytes,
+    record_version: int,
+    max_name_length: int,
+) -> Tuple[Optional[str], Optional[str]]:
     """
     pilotConfig layout by firmware generation:
       v0 (≤3.5):        only craft name
@@ -187,7 +235,7 @@ def decode_names(payload: bytes, record_version: int) -> Tuple[Optional[str], Op
     if not payload:
         return None, None
 
-    entry_len = MAX_NAME_LENGTH + 1
+    entry_len = max_name_length + 1
     craft = None
     pilot = None
 
@@ -205,10 +253,72 @@ def decode_names(payload: bytes, record_version: int) -> Tuple[Optional[str], Op
     return craft, pilot
 
 
-def generate_report(
-    dump: ConfigDump, pgn_map: Dict[int, str]
+def compute_file_hashes(data: bytes) -> Tuple[str, str]:
+    """Return MD5 and SHA-256 hashes for the provided file content."""
+
+    return hashlib.md5(data).hexdigest(), hashlib.sha256(data).hexdigest()
+
+
+def build_result(
+    craft_name: Optional[str],
+    pilot_name: Optional[str],
+    file_md5: str,
+    file_sha256: str,
+) -> Dict[str, str]:
+    """Build the normalized result payload used by text and JSON outputs."""
+
+    return {
+        "craft_name": craft_name or "(unknown)",
+        "pilot_name": pilot_name or "(unknown)",
+        "md5": file_md5,
+        "sha256": file_sha256,
+    }
+
+
+def generate_summary(
+    craft_name: Optional[str],
+    pilot_name: Optional[str],
+    file_md5: str,
+    file_sha256: str,
+) -> str:
+    """Render the default human-readable result block."""
+
+    result = build_result(craft_name, pilot_name, file_md5, file_sha256)
+    lines = [
+        "Results:",
+        f"  Craft name : {result['craft_name']}",
+        f"  Pilot name : {result['pilot_name']}",
+        f"  MD5        : {result['md5']}",
+        f"  SHA256     : {result['sha256']}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def generate_json_result(
+    craft_name: Optional[str],
+    pilot_name: Optional[str],
+    file_md5: str,
+    file_sha256: str,
+) -> str:
+    """Render the extracted result as formatted JSON."""
+
+    result = build_result(craft_name, pilot_name, file_md5, file_sha256)
+    return json.dumps(result, indent=2) + "\n"
+
+
+def generate_report(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    dump: ConfigDump,
+    pgn_map: Dict[int, str],
+    file_md5: str,
+    file_sha256: str,
+    pilot_config_pgn: int,
+    max_name_length: int,
 ) -> Tuple[str, Optional[str], Optional[str]]:
+    """Render the verbose report and return any extracted craft/pilot names."""
+
     lines: List[str] = []
+    lines.append(f"File MD5              : {file_md5}")
+    lines.append(f"File SHA256           : {file_sha256}")
     lines.append(f"EEPROM format version : {dump.header.version}")
     if dump.header.magic == CONFIG_MAGIC:
         lines.append("Header magic          : 0xBE (OK)")
@@ -238,25 +348,29 @@ def generate_report(
             f"  Version {record.version}, classification: {describe_flags(record.flags)}"
         )
         lines.append(
-            f"  Payload size: {len(record.payload)} bytes (record size {record.size} bytes, offset 0x{record.offset:04X})"
+            "  Payload size: "
+            f"{len(record.payload)} bytes "
+            f"(record size {record.size} bytes, offset 0x{record.offset:04X})"
         )
-        if record.pgn == PG_PILOT_CONFIG:
-            craft, pilot = decode_names(record.payload, record.version)
+        if record.pgn == pilot_config_pgn:
+            craft, pilot = decode_names(record.payload, record.version, max_name_length)
             craft_name = craft_name or craft
             pilot_name = pilot_name or pilot
         lines.append(format_hexdump(record.payload))
         lines.append("")
 
     if craft_name or pilot_name:
-        lines.append("Summary:")
-        lines.append(f"  Craft name : {craft_name or '(unknown)'}")
-        lines.append(f"  Pilot name : {pilot_name or '(unknown)'}")
+        lines.append(
+            generate_summary(craft_name, pilot_name, file_md5, file_sha256).rstrip()
+        )
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n", craft_name, pilot_name
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the command-line interface parser."""
+
     parser = argparse.ArgumentParser(
         description="Decode Betaflight EEPROM/FLASH config dump"
     )
@@ -271,15 +385,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to pg_ids.h for PGN names (auto-detected if omitted)",
     )
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show the full decoded report instead of only the summary",
+    )
+    output_group.add_argument(
+        "--json",
+        action="store_true",
+        help="Show the extracted result as JSON",
+    )
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:  # pylint: disable=too-many-locals
+    """Run the CLI entry point."""
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
     dump_path = Path(args.dump).expanduser()
     data = dump_path.read_bytes()
+    file_md5, file_sha256 = compute_file_hashes(data)
     config_dump = parse_config_dump(data)
 
     if args.pg_header:
@@ -291,15 +419,31 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"PG header file not found at {header_path} (expected beta_pg_ids.h)"
         )
 
+    pilot_config_pgn, max_name_length = load_runtime_constants(
+        header_path, DEFAULT_PILOT_HEADER
+    )
     pg_map = load_pgn_map(header_path)
-    report, _, _ = generate_report(config_dump, pg_map)
+    report, craft_name, pilot_name = generate_report(
+        config_dump,
+        pg_map,
+        file_md5,
+        file_sha256,
+        pilot_config_pgn,
+        max_name_length,
+    )
+    if args.verbose:
+        output = report
+    elif args.json:
+        output = generate_json_result(craft_name, pilot_name, file_md5, file_sha256)
+    else:
+        output = generate_summary(craft_name, pilot_name, file_md5, file_sha256)
 
     if args.output:
         output_path = Path(args.output).expanduser()
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(report)
+        output_path.write_text(output, encoding="utf-8")
     else:
-        print(report, end="")
+        print(output, end="")
     return 0
 
 
