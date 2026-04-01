@@ -151,8 +151,11 @@ Results:
 
 - Different controllers may require different extraction parameters.
 - Some platforms are only partially supported.
-- For INAV, use `--verbose` or `--json` on `inav_dump_config.py` for a more
-  detailed report.
+- depending of the detected flight controller use inav_something or beta_something. 
+- For config dumper, use `--verbose` or `--json` for a more detailed debug or report.
+
+## Feedback
+ - Please send us any exotic Firmware unsupported or where the extraction did not succeed.
 
 ## Author and License
 
