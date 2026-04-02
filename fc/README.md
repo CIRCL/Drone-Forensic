@@ -28,6 +28,17 @@ Currently, the tooling can recover:
 - Pilot name
 - Saved waypoints
 
+Additionally it is possible to extract the serial number of the STM32 Chip by using
+a ST-LINK programmer directly on the STM32
+
+```bash
+$ ./get_stm_uid.py f722
+Chip        : STM32F722
+UID address : 0x1FF07A10
+UID bytes   : 2B 00 49 00 0F 51 33 34 37 38 39 32
+mcu_id      : 0x49002b3433510f32393837
+```
+
 ## YARA Rules
 
 The YARA rules are stored in [`fc/yara/`](./yara).
@@ -154,7 +165,7 @@ Results:
 - depending of the detected flight controller use inav_something or beta_something. 
 - For config dumper, use `--verbose` or `--json` for a more detailed debug or report.
 
-## Feedback
+## fEEDBACk
  - Please send us any exotic Firmware unsupported or where the extraction did not succeed.
 
 ## Author and License
