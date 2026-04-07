@@ -1048,11 +1048,17 @@ def decode_file(
         )
 
     if json_output:
+        has_any_gps = any(bool(entry.get("has_gps")) for entry in metadata_entries)
         print(
             json.dumps(
                 {
                     "input_file": str(path),
                     **file_hashes,
+                    "generated_outputs": {
+                        "main_csv": not only_gpx,
+                        "gps_csv": not only_gpx and has_any_gps,
+                        "gpx": has_any_gps,
+                    },
                     "logs": metadata_entries,
                 },
                 ensure_ascii=False,
