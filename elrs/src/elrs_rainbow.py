@@ -5,6 +5,9 @@ Look up an ELRS binding phrase from a kvrocks-backed rainbow table.
 Input: six comma-separated byte values (decimal, 0-255) representing the UID.
 The script will convert them to the MD5-derived key used in the rainbow table
 and fetch the original binding phrase from kvrocks.
+
+author = "CIRCL https://www.circl.lu/"
+license = "GNU Affero General Public Licence https://www.gnu.org/licenses/agpl-3.0.en.html"
 """
 
 from __future__ import annotations

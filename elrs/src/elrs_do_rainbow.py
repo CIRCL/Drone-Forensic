@@ -7,6 +7,9 @@ Generate a binding phrase rainbow table and store it in Redis.
 - Persists the mapping {md5(-DMY_BINDING_PHRASE="pass")
     -> first 6 bytes -> pass} in kvrocks `prefix:UID`.
 - Tracks progress in status.txt so the job for resume.
+
+author = "CIRCL https://www.circl.lu/"
+license = "GNU Affero General Public Licence https://www.gnu.org/licenses/agpl-3.0.en.html"
 """
 import argparse
 import hashlib

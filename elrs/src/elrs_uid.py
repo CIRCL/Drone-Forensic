@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""
+Compute the ELRS UID derived from a binding phrase.
+
+author = "CIRCL https://www.circl.lu/"
+license = "GNU Affero General Public Licence https://www.gnu.org/licenses/agpl-3.0.en.html"
+"""
 import hashlib
 
 
