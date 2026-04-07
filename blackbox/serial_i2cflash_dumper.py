@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+"""
+Dump an ESP8266/ESP8285 flash chip over serial in fixed-size blocks.
+
+Usage:
+    python serial_i2cflash_dumper.py
+
+Example:
+    python serial_i2cflash_dumper.py
+        => esp8285_flash_dump_resume.bin
+
+author = "CIRCL https://www.circl.lu/"
+license = "GNU Affero General Public Licence https://www.gnu.org/licenses/agpl-3.0.en.html"
+"""
 import os
 import subprocess
 import time
