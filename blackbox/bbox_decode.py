@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -748,6 +749,27 @@ def build_log_metadata(log_index: int, config: LogConfig) -> dict[str, object]:
     return metadata
 
 
+def add_gps_info_metadata(
+    metadata: dict[str, object],
+    first_point: dict[str, str] | None,
+    last_point: dict[str, str] | None,
+) -> None:
+    """Attach first and last GPS coordinates to one metadata entry."""
+    metadata["has_gps"] = first_point is not None and last_point is not None
+    if first_point is None or last_point is None:
+        metadata["arming_coord"] = None
+        metadata["disarmed_coord"] = None
+        return
+    metadata["arming_coord"] = {
+        "lat": first_point["lat"],
+        "lon": first_point["lon"],
+    }
+    metadata["disarmed_coord"] = {
+        "lat": last_point["lat"],
+        "lon": last_point["lon"],
+    }
+
+
 def print_log_metadata(log_index: int, config: LogConfig) -> None:
     """Print human-readable metadata for one log."""
     raw_log_start = config.log_start_datetime_raw
@@ -807,7 +829,8 @@ def process_log(
 ) -> None:
     """Decode one embedded log and emit the requested output files."""
     frame_defs, config, payload_start = parse_header(data, start)
-    metadata_entries.append(build_log_metadata(log_index, config))
+    metadata = build_log_metadata(log_index, config)
+    metadata_entries.append(metadata)
     if not json_output:
         print_log_metadata(log_index, config)
     ctx = LogContext(frame_defs=frame_defs, config=config)
@@ -960,9 +983,15 @@ def process_log(
 
     if gps_points:
         write_gpx(gpx_path, gps_points)
+        if info_output or json_output:
+            metadata["gps_point_count"] = len(gps_points)
+            add_gps_info_metadata(metadata, gps_points[0], gps_points[-1])
         if info_output:
             print_gps_info(json_output, gps_points[0], gps_points[-1])
     else:
+        if info_output or json_output:
+            metadata["gps_point_count"] = 0
+            add_gps_info_metadata(metadata, None, None)
         print_no_gps_traces(json_output)
 
 
@@ -980,16 +1009,29 @@ def find_log_offsets(data: bytes) -> list[int]:
     return offsets
 
 
+def compute_file_hashes(data: bytes) -> dict[str, str]:
+    """Return the MD5 and SHA256 digests for one input file."""
+    return {
+        "md5": hashlib.md5(data).hexdigest(),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
 def decode_file(
     path: Path, json_output: bool = False, only_gpx: bool = False, info_output: bool = False
 ) -> None:
     """Decode every embedded log from ``path``."""
     data = path.read_bytes()
+    file_hashes = compute_file_hashes(data)
     offsets = find_log_offsets(data)
     if not offsets:
         raise SystemExit("no Blackbox logs found")
 
     metadata_entries: list[dict[str, object]] = []
+    if info_output and not json_output:
+        print(f"MD5:{file_hashes['md5']}")
+        print(f"SHA256:{file_hashes['sha256']}")
+
     offsets.append(len(data))
     for log_index, start in enumerate(offsets[:-1], start=1):
         end = offsets[log_index]
@@ -1006,7 +1048,17 @@ def decode_file(
         )
 
     if json_output:
-        print(json.dumps(metadata_entries, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    "input_file": str(path),
+                    **file_hashes,
+                    "logs": metadata_entries,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
 
 
 def main() -> None:

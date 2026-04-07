@@ -47,13 +47,16 @@ python3 blackbox/bbox_decode.py --info blackbox/blackbox/bbox_eventfull.bin
 
 Example output:
 
-```text
+```text 
+MD5:c38c7d9632471ae87ff1daaf33558bec
+SHA256:a24d8de3ff363e011366cdc4dee7900b780adfb18feb49ce9dae5a03da277234
 [log 01]
 Firmware revision:INAV 9.0.0 (a7932b92) SKYSTARSF405V2
 Firmware date:Jan 14 2026 08:48:42
 Log start datetime:2026-01-14T13:56:55.398+00:00
 Arming Coord:36.1815787,117.0996749
 Disarmed Coord:36.1816576,117.0997670
+...
 ```
 
 This mode is useful to quickly identify:
