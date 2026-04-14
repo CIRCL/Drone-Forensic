@@ -1,0 +1,5 @@
+{
+  "url": "https://misp.example.org",
+  "key": "YOUR_MISP_AUTH_KEY_HERE",
+  "verify_ssl": true
+}
