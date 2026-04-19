@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drone-forensic-misp"
+version = "0.1.0"
+description = "Generate a MISP Event from drone forensic artifacts (FC dump, blackbox log, ELRS config)."
+requires-python = ">=3.10"
+dependencies = [
+    "pymisp",
+    "yara-python",
+    "redis",
+    "folium",
+]
+
+[project.optional-dependencies]
+notebook = ["jupyter"]
+
+[project.scripts]
+drone-to-misp = "drone_to_misp:main"
+
+[tool.setuptools]
+py-modules = ["drone_to_misp"]
+
+[tool.setuptools.package-dir]
+"" = "misp"
