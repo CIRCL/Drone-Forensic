@@ -29,7 +29,7 @@ from pymisp import MISPEvent, MISPObject
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "fc" / "src"))
-sys.path.insert(0, str(REPO_ROOT / "blackbox"))
+sys.path.insert(0, str(REPO_ROOT / "blackbox" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "elrs" / "src"))
 
 import inav_extract_flash as inav_extract    # noqa: E402
