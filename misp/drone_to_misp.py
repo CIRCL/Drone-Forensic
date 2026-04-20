@@ -342,11 +342,14 @@ def extract_elrs(path: Path) -> dict[str, Any]:
     """
     data = path.read_bytes()
     payload = data
+    fmt = "raw"
     if _is_intel_hex(data):
+        fmt = "Intel hex"
         try:
             payload = _ihex_to_bin(data)
         except ValueError:
             payload = data  # malformed HEX — scan the raw bytes anyway
+            fmt = "raw"
     entries = dump_elrs.extract_json_objects(payload)
     collected = []
     for e in entries:
@@ -357,6 +360,7 @@ def extract_elrs(path: Path) -> dict[str, Any]:
         })
     return {
         "file": {"path": str(path), "filename": path.name, **_hashes(data)},
+        "format": fmt,
         "entries": collected,
     }
 
@@ -481,36 +485,26 @@ def _build_uav_object(craft_info: dict[str, Any],
         obj.add_attribute("firmware-version", value=craft_info["firmware_version"])
     if fw.get("family"):
         obj.add_attribute("variant", value=fw["family"])
-    return obj
-
-
-def _build_iot_device(fc_data: dict[str, Any]) -> MISPObject | None:
-    fw = fc_data.get("firmware", {})
-    if not (fw.get("target") or fw.get("chipset")):
-        return None
-    obj = MISPObject("iot-device")
-    if fw.get("target"):
-        obj.add_attribute("model", value=fw["target"])
     if fw.get("chipset"):
-        obj.add_attribute("architecture", value=fw["chipset"])
-    if fw.get("family"):
-        obj.add_attribute("platform", value=fw["family"])
+        obj.add_attribute("chipset", value=fw["chipset"])
     return obj
 
 
-def _build_iot_firmware(fc_data: dict[str, Any]) -> MISPObject | None:
-    file_info = fc_data.get("file")
-    if not file_info:
-        return None
+def _build_iot_firmware(file_info: dict[str, Any], *,
+                        fmt: str = "raw",
+                        version: str | None = None) -> MISPObject:
     obj = MISPObject("iot-firmware")
     obj.add_attribute("filename", value=file_info["filename"])
     obj.add_attribute("md5", value=file_info["md5"])
     obj.add_attribute("sha256", value=file_info["sha256"])
     obj.add_attribute("size-in-bytes", value=file_info["size"])
-    obj.add_attribute("format", value="raw")
-    build_macro = fc_data.get("firmware", {}).get("build_macro")
-    if build_macro:
-        obj.add_attribute("version", value=build_macro)
+    obj.add_attribute("format", value=fmt)
+    if version:
+        obj.add_attribute("version", value=version)
+    obj.add_attribute(
+        "firmware", value=file_info["filename"],
+        data=io.BytesIO(Path(file_info["path"]).read_bytes()),
+    )
     return obj
 
 
@@ -552,7 +546,6 @@ def _build_elrs_objects(
             uid_str = "-".join(f"{b:02X}" for b in uid_bytes)
             rc_obj = MISPObject("remote-controller")
             rc_obj.add_attribute("model", value="ExpressLRS receiver")
-            rc_obj.add_attribute("serial-number", value=uid_str)
             rc_obj.add_attribute("remote-controller-id", value=uid_str)
     return wifi_obj, rc_obj
 
@@ -561,6 +554,7 @@ def build_event(extracted: dict[str, Any],
                 event_info: str | None = None) -> MISPEvent:
     event = MISPEvent()
     event.info = event_info or "Drone forensic analysis"
+    event.distribution = 0  # Your Organisation Only
 
     fc_data = extracted.get("fc")
     blackbox_data = extracted.get("blackbox")
@@ -571,16 +565,14 @@ def build_event(extracted: dict[str, Any],
     if uav is not None:
         event.add_object(uav)
 
-    fc_file = iot_device = iot_firmware = None
+    iot_firmware = None
     if fc_data:
-        fc_file = _build_file_object(fc_data["file"])
-        event.add_object(fc_file)
-        iot_device = _build_iot_device(fc_data)
-        if iot_device is not None:
-            event.add_object(iot_device)
-        iot_firmware = _build_iot_firmware(fc_data)
-        if iot_firmware is not None:
-            event.add_object(iot_firmware)
+        iot_firmware = _build_iot_firmware(
+            fc_data["file"],
+            fmt="raw",
+            version=fc_data.get("firmware", {}).get("build_macro") or None,
+        )
+        event.add_object(iot_firmware)
 
     fc_gpx = None
     if fc_data and fc_data.get("gpx_text"):
@@ -614,10 +606,12 @@ def build_event(extracted: dict[str, Any],
         for _, geo in geolocation_objs:
             event.add_object(geo)
 
-    elrs_file = wifi_obj = rc_obj = None
+    elrs_firmware = wifi_obj = rc_obj = None
     if elrs_data:
-        elrs_file = _build_file_object(elrs_data["file"])
-        event.add_object(elrs_file)
+        elrs_firmware = _build_iot_firmware(
+            elrs_data["file"], fmt=elrs_data.get("format", "raw"),
+        )
+        event.add_object(elrs_firmware)
         wifi_obj, rc_obj = _build_elrs_objects(elrs_data)
         if wifi_obj is not None:
             event.add_object(wifi_obj)
