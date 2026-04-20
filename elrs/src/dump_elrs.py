@@ -151,7 +151,7 @@ def print_text_output(
         if debug:
             debug_fragments.append(str(entry["fragment"]))
         if entry["uid"] is not None:
-            print(f'uid: {entry["uid"]}')
+            print(f'uid :{str(entry["uid"]).replace(" ", "")}')
         if entry["wifi_ssid"] is not None:
             print(f'wifi-ssid: {entry["wifi_ssid"]}')
         if entry["wifi_password"] is not None:
