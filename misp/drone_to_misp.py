@@ -619,40 +619,33 @@ def build_event(extracted: dict[str, Any],
             event.add_object(rc_obj)
 
     _add_references(
-        uav=uav, fc_file=fc_file, iot_device=iot_device,
-        iot_firmware=iot_firmware, fc_gpx=fc_gpx, blackbox_file=blackbox_file,
-        blackbox_gpx=blackbox_gpx, geolocation_objs=geolocation_objs,
-        elrs_file=elrs_file, wifi_obj=wifi_obj, rc_obj=rc_obj,
+        uav=uav, iot_firmware=iot_firmware,
+        fc_gpx=fc_gpx, blackbox_file=blackbox_file, blackbox_gpx=blackbox_gpx,
+        geolocation_objs=geolocation_objs, elrs_firmware=elrs_firmware,
+        wifi_obj=wifi_obj, rc_obj=rc_obj,
     )
     return event
 
 
 def _add_references(
-        *, uav, fc_file, iot_device, iot_firmware, fc_gpx,
+        *, uav, iot_firmware, fc_gpx,
         blackbox_file, blackbox_gpx,
-        geolocation_objs, elrs_file, wifi_obj, rc_obj):
+        geolocation_objs, elrs_firmware, wifi_obj, rc_obj):
     gpx = fc_gpx or blackbox_gpx
-    if uav and fc_file:
-        fc_file.add_reference(uav.uuid, "derived-from")
-    if uav and iot_device:
-        uav.add_reference(iot_device.uuid, "contains")
-    if iot_firmware and iot_device:
-        iot_firmware.add_reference(iot_device.uuid, "related-to")
-    if fc_file and iot_firmware:
-        fc_file.add_reference(iot_firmware.uuid, "related-to")
+    if uav and iot_firmware:
+        uav.add_reference(iot_firmware.uuid, "contains")
     if uav and gpx:
         uav.add_reference(gpx.uuid, "navigates")
     if gpx:
-        for _, geo in geolocation_objs:
-            geo.add_reference(gpx.uuid, "related-to")
+        for kind, geo in geolocation_objs:
+            relation = "starts" if kind == "arming" else "ends"
+            geo.add_reference(gpx.uuid, relation)
     if uav and blackbox_file:
-        blackbox_file.add_reference(uav.uuid, "derived-from")
-    if wifi_obj and rc_obj:
-        wifi_obj.add_reference(rc_obj.uuid, "related-to")
-    if wifi_obj and elrs_file:
-        elrs_file.add_reference(wifi_obj.uuid, "derived-from")
-    elif uav and elrs_file:
-        elrs_file.add_reference(uav.uuid, "derived-from")
+        uav.add_reference(blackbox_file.uuid, "contains")
+    if uav and elrs_firmware:
+        uav.add_reference(elrs_firmware.uuid, "contains")
+    if uav and wifi_obj:
+        uav.add_reference(wifi_obj.uuid, "connects-to")
     if rc_obj and uav:
         rc_obj.add_reference(uav.uuid, "controls")
 
