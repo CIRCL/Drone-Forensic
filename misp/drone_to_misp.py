@@ -261,9 +261,93 @@ def extract_blackbox(path: Path) -> dict[str, Any]:
     return result
 
 
+_IHEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
+
+
+def _is_intel_hex(data: bytes) -> bool:
+    """Sniff Intel HEX: starts with ':' followed by 8 ASCII hex digits."""
+    stripped = data.lstrip()
+    if len(stripped) < 11 or stripped[0:1] != b":":
+        return False
+    return all(b in _IHEX_DIGITS for b in stripped[1:9])
+
+
+def _ihex_to_bin(data: bytes) -> bytes:
+    """Decode Intel HEX to binary, matching `objcopy -I ihex -O binary`.
+
+    Handles record types 00 (data), 01 (EOF), 02 (extended segment address),
+    and 04 (extended linear address). Start-address records (03, 05) are
+    ignored — they have no effect on -O binary output. Gaps are filled with
+    0xFF (objcopy's default).
+    """
+    payload: dict[int, int] = {}
+    base = 0
+    saw_eof = False
+
+    for line in data.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line[0:1] != b":":
+            raise ValueError(f"Intel HEX record does not start with ':': {line[:16]!r}")
+        try:
+            raw = bytes.fromhex(line[1:].decode("ascii"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError(f"Malformed Intel HEX record: {line[:16]!r}") from exc
+        if len(raw) < 5:
+            raise ValueError(f"Intel HEX record too short: {line!r}")
+
+        length, addr_hi, addr_lo, rtype = raw[0], raw[1], raw[2], raw[3]
+        addr = (addr_hi << 8) | addr_lo
+        record_data = raw[4:4 + length]
+        checksum = raw[4 + length]
+        if len(record_data) != length:
+            raise ValueError(f"Intel HEX length mismatch: {line!r}")
+        if (sum(raw[:4 + length]) + checksum) & 0xFF != 0:
+            raise ValueError(f"Intel HEX checksum error: {line!r}")
+
+        if rtype == 0x00:
+            absolute = base + addr
+            for i, byte in enumerate(record_data):
+                payload[absolute + i] = byte
+        elif rtype == 0x01:
+            saw_eof = True
+            break
+        elif rtype == 0x02:
+            if length != 2:
+                raise ValueError(f"Intel HEX type 02 length must be 2: {line!r}")
+            base = ((record_data[0] << 8) | record_data[1]) << 4
+        elif rtype == 0x04:
+            if length != 2:
+                raise ValueError(f"Intel HEX type 04 length must be 2: {line!r}")
+            base = ((record_data[0] << 8) | record_data[1]) << 16
+        # rtype 0x03 / 0x05: start-address records — ignored for -O binary
+
+    if not payload:
+        return b""
+    if not saw_eof:
+        raise ValueError("Intel HEX missing EOF record")
+
+    lo, hi = min(payload), max(payload)
+    return bytes(payload.get(addr, 0xFF) for addr in range(lo, hi + 1))
+
+
 def extract_elrs(path: Path) -> dict[str, Any]:
+    """Extract embedded JSON configs from an ELRS RX dump.
+
+    Intel HEX inputs are auto-converted to binary before scanning (same
+    result as `objcopy -I ihex -O binary`). The file hash still reflects
+    the on-disk artifact, since that's the fingerprint the analyst was
+    handed.
+    """
     data = path.read_bytes()
-    entries = dump_elrs.extract_json_objects(data)
+    payload = data
+    if _is_intel_hex(data):
+        try:
+            payload = _ihex_to_bin(data)
+        except ValueError:
+            payload = data  # malformed HEX — scan the raw bytes anyway
+    entries = dump_elrs.extract_json_objects(payload)
     collected = []
     for e in entries:
         collected.append({
