@@ -246,18 +246,26 @@ def extract_blackbox(path: Path) -> dict[str, Any]:
             meta = {}
         result["logs"] = meta.get("logs", [])
 
+        gpx_by_index: dict[int, dict[str, Any]] = {}
         for gpx_path in sorted(Path(tmpdir).glob("*.gps.gpx")):
             content = gpx_path.read_text()
-            if "<trkpt " in content:
-                gpx_bytes = content.encode("utf-8")
-                result["gpx_text"] = content
-                result["gpx_filename"] = gpx_path.name
-                result["gpx_hashes"] = {
-                    "md5": hashlib.md5(gpx_bytes).hexdigest(),
-                    "sha256": hashlib.sha256(gpx_bytes).hexdigest(),
-                    "size": len(gpx_bytes),
-                }
-                break
+            if "<trkpt " not in content:
+                continue
+            match = re.search(r"\.(\d+)\.gps\.gpx$", gpx_path.name)
+            if not match:
+                continue
+            idx = int(match.group(1))
+            blob = content.encode("utf-8")
+            gpx_by_index[idx] = {
+                "gpx_text": content,
+                "gpx_filename": gpx_path.name,
+                "gpx_hashes": {
+                    "md5": hashlib.md5(blob).hexdigest(),
+                    "sha256": hashlib.sha256(blob).hexdigest(),
+                    "size": len(blob),
+                },
+            }
+        result["gpx_by_index"] = gpx_by_index
 
     return result
 
@@ -508,25 +516,25 @@ def _build_iot_firmware(file_info: dict[str, Any], *,
     return obj
 
 
-def _build_geolocations(blackbox_data: dict[str, Any]) -> list[tuple[str, MISPObject]]:
-    out: list[tuple[str, MISPObject]] = []
-    primary = _pick_primary_log(blackbox_data.get("logs", []))
-    if not primary or not primary.get("has_gps"):
-        return out
-    arming = primary.get("arming_coord")
-    disarmed = primary.get("disarmed_coord")
-    if arming:
-        obj = MISPObject("geolocation")
-        obj.add_attribute("latitude", value=float(arming["lat"]))
-        obj.add_attribute("longitude", value=float(arming["lon"]))
-        obj.add_attribute("text", value="arming position")
-        out.append(("arming", obj))
-    if disarmed:
-        obj = MISPObject("geolocation")
-        obj.add_attribute("latitude", value=float(disarmed["lat"]))
-        obj.add_attribute("longitude", value=float(disarmed["lon"]))
-        obj.add_attribute("text", value="disarming position")
-        out.append(("disarming", obj))
+def _build_geolocations(
+        blackbox_data: dict[str, Any]) -> list[tuple[int, str, MISPObject]]:
+    out: list[tuple[int, str, MISPObject]] = []
+    for log in blackbox_data.get("logs", []):
+        if not log.get("has_gps"):
+            continue
+        idx = log["log_index"]
+        for coord_key, label, kind in (
+            ("arming_coord",   "arming position",    "arming"),
+            ("disarmed_coord", "disarming position", "disarming"),
+        ):
+            coord = log.get(coord_key)
+            if not coord:
+                continue
+            obj = MISPObject("geolocation")
+            obj.add_attribute("latitude", value=float(coord["lat"]))
+            obj.add_attribute("longitude", value=float(coord["lon"]))
+            obj.add_attribute("text", value=label)
+            out.append((idx, kind, obj))
     return out
 
 
@@ -589,21 +597,23 @@ def build_event(extracted: dict[str, Any],
         )
         event.add_object(fc_gpx)
 
-    blackbox_file = blackbox_gpx = None
-    geolocation_objs: list[tuple[str, MISPObject]] = []
+    blackbox_file = None
+    blackbox_gpx_by_index: dict[int, MISPObject] = {}
+    geolocation_objs: list[tuple[int, str, MISPObject]] = []
     if blackbox_data:
         blackbox_file = _build_file_object(blackbox_data["file"])
         event.add_object(blackbox_file)
-        if blackbox_data.get("gpx_text") and fc_gpx is None:
-            blackbox_gpx = _build_gpx_object(
-                blackbox_data["gpx_text"],
-                filename=blackbox_data.get("gpx_filename", "flight.gpx"),
-                hashes=blackbox_data["gpx_hashes"],
+        for idx, gpx_info in blackbox_data.get("gpx_by_index", {}).items():
+            gpx_obj = _build_gpx_object(
+                gpx_info["gpx_text"],
+                filename=gpx_info["gpx_filename"],
+                hashes=gpx_info["gpx_hashes"],
                 waypoint_count=0,
             )
-            event.add_object(blackbox_gpx)
+            event.add_object(gpx_obj)
+            blackbox_gpx_by_index[idx] = gpx_obj
         geolocation_objs = _build_geolocations(blackbox_data)
-        for _, geo in geolocation_objs:
+        for _, _, geo in geolocation_objs:
             event.add_object(geo)
 
     elrs_firmware = wifi_obj = rc_obj = None
@@ -620,7 +630,8 @@ def build_event(extracted: dict[str, Any],
 
     _add_references(
         uav=uav, iot_firmware=iot_firmware,
-        fc_gpx=fc_gpx, blackbox_file=blackbox_file, blackbox_gpx=blackbox_gpx,
+        fc_gpx=fc_gpx, blackbox_file=blackbox_file,
+        blackbox_gpx_by_index=blackbox_gpx_by_index,
         geolocation_objs=geolocation_objs, elrs_firmware=elrs_firmware,
         wifi_obj=wifi_obj, rc_obj=rc_obj,
     )
@@ -629,17 +640,21 @@ def build_event(extracted: dict[str, Any],
 
 def _add_references(
         *, uav, iot_firmware, fc_gpx,
-        blackbox_file, blackbox_gpx,
+        blackbox_file, blackbox_gpx_by_index,
         geolocation_objs, elrs_firmware, wifi_obj, rc_obj):
-    gpx = fc_gpx or blackbox_gpx
     if uav and iot_firmware:
         uav.add_reference(iot_firmware.uuid, "contains")
-    if uav and gpx:
-        uav.add_reference(gpx.uuid, "navigates")
-    if gpx:
-        for kind, geo in geolocation_objs:
-            relation = "starts" if kind == "arming" else "ends"
-            geo.add_reference(gpx.uuid, relation)
+    if uav and fc_gpx:
+        uav.add_reference(fc_gpx.uuid, "plans")
+    if uav:
+        for bb_gpx in blackbox_gpx_by_index.values():
+            uav.add_reference(bb_gpx.uuid, "navigated")
+    for idx, kind, geo in geolocation_objs:
+        target = blackbox_gpx_by_index.get(idx)
+        if target is None:
+            continue
+        relation = "starts" if kind == "arming" else "ends"
+        geo.add_reference(target.uuid, relation)
     if uav and blackbox_file:
         uav.add_reference(blackbox_file.uuid, "contains")
     if uav and elrs_firmware:
