@@ -452,6 +452,13 @@ def _gpx_bbox(gpx_text: str) -> dict[str, float]:
     }
 
 
+def _gpx_time_bounds(gpx_text: str) -> tuple[str, str] | None:
+    times = re.findall(r"<time>([^<]+)</time>", gpx_text)
+    if not times:
+        return None
+    return times[0], times[-1]
+
+
 def _build_gpx_object(gpx_text: str, filename: str, hashes: dict[str, Any],
                       waypoint_count: int) -> MISPObject:
     obj = MISPObject("gpx")
@@ -474,6 +481,9 @@ def _build_gpx_object(gpx_text: str, filename: str, hashes: dict[str, Any],
         obj.add_attribute("point-count", value=bbox["point_count"])
     if waypoint_count:
         obj.add_attribute("waypoint-count", value=waypoint_count)
+    bounds = _gpx_time_bounds(gpx_text)
+    if bounds:
+        obj.first_seen, obj.last_seen = bounds
     return obj
 
 
