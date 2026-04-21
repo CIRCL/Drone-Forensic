@@ -20,12 +20,15 @@ import contextlib
 import hashlib
 import io
 import json
+import re
 import sys
 import tempfile
+import yara
+from html import escape
 from pathlib import Path
 from typing import Any
 
-from pymisp import MISPEvent, MISPObject
+from pymisp import MISPEvent, MISPObject, PyMISP
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "fc" / "src"))
@@ -63,7 +66,6 @@ def _hashes(data: bytes) -> dict[str, Any]:
 
 
 def _yara_scan(rules_path: Path, data: bytes) -> list[dict[str, Any]]:
-    import yara
     rules = yara.compile(filepath=str(rules_path))
     return [
         {"rule": m.rule, "meta": dict(m.meta) if m.meta else {}}
@@ -200,7 +202,6 @@ def _build_waypoint_gpx(waypoints, craft: str | None, pilot: str | None) -> str:
     if pilot:
         title_parts.append(pilot)
     track_name = craft or "Mission Track"
-    from html import escape
     out.write('<?xml version="1.0" encoding="UTF-8"?>\n')
     out.write(
         '<gpx version="1.1" creator="drone_to_misp" '
@@ -431,7 +432,6 @@ def _merge_craft_info(fc_data: dict[str, Any] | None,
 
 
 def _gpx_bbox(gpx_text: str) -> dict[str, float]:
-    import re
     pts = re.findall(r'<trkpt[^>]*lat="([^"]+)"[^>]*lon="([^"]+)"', gpx_text)
     if not pts:
         return {}
@@ -702,7 +702,6 @@ def _load_misp_config(path: Path) -> dict[str, Any]:
 
 def _push_event(event: MISPEvent, config_path: Path) -> None:
     config = _load_misp_config(config_path)
-    from pymisp import PyMISP
     client = PyMISP(config["url"], config["key"], ssl=config.get("verify_ssl", True))
     response = client.add_event(event)
     print(json.dumps(response, indent=2) if isinstance(response, dict) else response)
