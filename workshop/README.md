@@ -26,11 +26,18 @@ between them.
 
 ## Install
 
-From the repository root:
+Clone the repository and set up a Python virtual environment:
 
 ```bash
+git clone https://github.com/circl/drone-forensic.git
+cd drone-forensic
 python3 -m venv venv
 source venv/bin/activate
+```
+
+Install requirements and the `drone-to-misp` package:
+
+```bash
 pip install -r requirements.txt
 pip install -e .
 ```
