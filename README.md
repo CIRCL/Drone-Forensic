@@ -1,4 +1,8 @@
+
 # Drone-Forensic
+<p align="center">
+  <img src="readme_pic.png" alt="README image" width="50%">
+</p>
 
 This repository is designed to accelerate the forensic analysis of DIY FPV
 drones and to help automate technical reporting from seized or recovered
@@ -14,7 +18,7 @@ Related reading:
 
 ## Repository Overview
 
-The repository is split into three main analysis areas:
+The repository is split into four main analysis areas:
 
 ### `fc/`
 
@@ -72,6 +76,24 @@ This part of the repository helps to:
 This is useful when investigating radio-control components and operator-side
 configuration left in ELRS TX/RX artifacts.
 
+### `misp/`
+
+MISP integration helpers to convert parsed drone artifacts into a structured
+MISP event ready for sharing or enrichment.
+
+This part of the repository helps to:
+
+- ingest any subset of `--fc`, `--blackbox`, and `--elrs` inputs
+- generate a single MISP Event JSON (`event.json` by default)
+- build related MISP objects (`uav`, `iot-firmware`, `file`, `gpx`, `geolocation`, `wifi-connection`, `remote-controller`)
+- preserve evidence hashes and include attachments
+- optionally push the generated event directly to a MISP instance
+
+Main files:
+
+- `misp/drone_to_misp.py`: extractor + event builder + optional push client
+- `misp/misp_config.json.example`: template for MISP URL/API key/SSL settings
+
 ## Intended Use
 
 This repository is intended for forensic and incident-response workflows where
@@ -83,6 +105,23 @@ Typical use cases include:
 - extracting structured technical indicators from controller or radio dumps
 - producing repeatable outputs for analyst notes and formal reports
 - preparing data for downstream sharing and correlation
+
+## Workshop
+
+The `workshop/` directory contains the Drone Forensic workshop material
+presented at FIRST CTI 2026.
+
+Event summary:
+
+- workshop title: `Drone Threat Intelligence Workshop`
+- format: hands-on session combining theory and practice for drone threat
+  hunting and intelligence sharing
+- when: Tuesday, April 21, 2026 (duration: 4h)
+- where: FIRST CTI 2026, Holiday Inn Munich City Centre, Munich, Germany
+
+Conference reference:
+
+- https://www.first.org/conference/firstcti26/program
 
 ## Notes
 
