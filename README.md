@@ -10,7 +10,7 @@ artifacts.
 
 The goal is pragmatic: extract useful evidence faster, normalize outputs, and
 produce data that can be reused in reports or shared into investigative
-platforms such as MISP.
+platforms such as [MISP](https://misp-project.org/).
 
 Related reading:
 
