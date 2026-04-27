@@ -118,6 +118,7 @@ Event summary:
   hunting and intelligence sharing
 - when: Tuesday, April 21, 2026 (duration: 4h)
 - where: FIRST CTI 2026, Holiday Inn Munich City Centre, Munich, Germany
+- [Slide-deck of the workshop](https://github.com/CIRCL/Drone-Forensic/tree/main/workshop/presentations)
 
 Conference reference:
 
